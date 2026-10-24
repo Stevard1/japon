@@ -46,35 +46,46 @@ const C = {"salt":"lHcfzFlm9qtIX3nEaC50tw==","iter":400000};
 const u8 = b => Uint8Array.from(atob(b), c => c.charCodeAt(0));
 const b64 = a => btoa(String.fromCharCode(...new Uint8Array(a)));
 const $ = id => document.getElementById(id);
-const store = { get(){ try { return localStorage.getItem("jp-key"); } catch (e) { return null; } }, set(v){ try { v ? localStorage.setItem("jp-key", v) : localStorage.removeItem("jp-key"); } catch (e) {} } };
-async function openApp(key, remember){
-  const r = await fetch("app.enc", {cache: "no-cache"}).catch(() => fetch("app.enc"));
+const L = {"k1": "jp-key", "f1": "app.enc", "k2": "jp-fkey", "f2": "suivre/suivre.enc", "c2": {"salt": "WoIDQKKfvso5zWr2/5+DHA==", "iter": 400000}};   // {k1, f1} : accès principal ; {k2, f2, c2} : accès famille / amis (autre mot de passe, autre clé)
+const LS = { get(k){ try { return localStorage.getItem(k); } catch (e) { return null; } }, set(k, v){ try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch (e) {} } };
+async function open_(file, key, storeAs){
+  const r = await fetch(file, {cache: "no-cache"}).catch(() => fetch(file));
   if (!r.ok) throw new Error("réseau");
   const buf = await r.arrayBuffer();
   const plain = await crypto.subtle.decrypt({name: "AES-GCM", iv: new Uint8Array(buf, 0, 12)}, key, new Uint8Array(buf, 12));
-  if (remember) store.set(b64(await crypto.subtle.exportKey("raw", key)));
+  if (storeAs) LS.set(storeAs, b64(await crypto.subtle.exportKey("raw", key)));
   const html = new TextDecoder().decode(plain);
   document.open(); document.write(html); document.close();
 }
+const imp = s => crypto.subtle.importKey("raw", u8(s), "AES-GCM", true, ["decrypt"]);
 function showLock(msg){ $("lock").hidden = false; $("err").textContent = msg || ""; }
 (async () => {
   if (!window.crypto || !crypto.subtle) return showLock("Ouvrez ce lien dans Safari (https).");
-  const saved = store.get();
-  if (saved) {
-    try { await openApp(await crypto.subtle.importKey("raw", u8(saved), "AES-GCM", true, ["decrypt"]), false); return; }
-    catch (e) { if (e.name === "OperationError") { store.set(null); return showLock("Le mot de passe a changé : entrez le nouveau."); } return showLock("Connexion impossible pour l'instant. Réessayez avec du réseau."); }
+  const k1 = LS.get(L.k1), k2 = L.k2 ? LS.get(L.k2) : null, suivi = L.k2 && LS.get("jp-mode") === "suivi";
+  try {
+    if (k1 && !(suivi && k2)) return await open_(L.f1, await imp(k1));
+    if (k2) return await open_(L.f2, await imp(k2));
+  } catch (e) {
+    if (e.name === "OperationError") { LS.set(k1 && !(suivi && k2) ? L.k1 : L.k2, null); LS.set("jp-mode", null); return showLock("Le mot de passe a changé : entrez le nouveau."); }
+    return showLock("Connexion impossible pour l'instant. Réessayez avec du réseau.");
   }
   showLock();
 })();
+async function derive(pw, c){
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({name: "PBKDF2", salt: u8(c.salt), iterations: c.iter, hash: "SHA-256"}, base, {name: "AES-GCM", length: 256}, true, ["decrypt"]);
+}
 $("f").addEventListener("submit", async e => {
   e.preventDefault();
   const pw = $("pw").value.normalize("NFC").toLowerCase().replace(/[\s\-_.]/g, "");
   if (!pw) return;
   $("go").disabled = true; $("err").textContent = "";
   try {
-    const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveKey"]);
-    const key = await crypto.subtle.deriveKey({name: "PBKDF2", salt: u8(C.salt), iterations: C.iter, hash: "SHA-256"}, base, {name: "AES-GCM", length: 256}, true, ["decrypt"]);
-    await openApp(key, true);
+    try { await open_(L.f1, await derive(pw, C), L.k1); LS.set("jp-mode", null); }
+    catch (err) {
+      if (err.name !== "OperationError" || !L.c2) throw err;
+      await open_(L.f2, await derive(pw, L.c2), L.k2);   // mot de passe des proches
+    }
   } catch (err) {
     $("go").disabled = false;
     $("err").textContent = err.name === "OperationError" ? "Mot de passe incorrect." : "Connexion impossible pour l'instant.";
